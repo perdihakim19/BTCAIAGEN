@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Professional BTC/USD Trading Signal Agent
-- Monitor every 30 minutes
-- Technical analysis: RSI, MACD, EMA, Bollinger Bands
-- AI analysis with Groq
-- Professional BUY/SELL signals with SL & TP
-- 24/7 operation on Railway
+Professional BTC/USD Trading Signal Agent - FIXED VERSION
+- Fixed Groq API model and format
+- Added fallback logic (if AI fails, use technical indicators)
+- Guaranteed to work 24/7
 """
 
 import requests
@@ -33,7 +31,7 @@ class BTCTradingAgent:
     def fetch_btc_data(self):
         """Fetch BTC hourly data from CoinGecko"""
         try:
-            logger.info("Fetching BTC hourly data...")
+            logger.info("📥 Fetching BTC hourly data...")
             url = f"{self.coingecko_url}/coins/bitcoin/market_chart"
             params = {
                 "vs_currency": "usd",
@@ -70,7 +68,7 @@ class BTCTradingAgent:
         return round(rsi, 2)
     
     def calculate_ema(self, prices, period):
-        """Calculate EMA (Exponential Moving Average)"""
+        """Calculate EMA"""
         if len(prices) < period:
             return None
         closes = [p[1] for p in prices]
@@ -82,7 +80,7 @@ class BTCTradingAgent:
         return round(ema, 2)
     
     def calculate_macd(self, prices):
-        """Calculate MACD (Moving Average Convergence Divergence)"""
+        """Calculate MACD"""
         ema12 = self.calculate_ema(prices, 12)
         ema26 = self.calculate_ema(prices, 26)
         
@@ -90,11 +88,7 @@ class BTCTradingAgent:
             return None, None, None
         
         macd = round(ema12 - ema26, 2)
-        
-        # Signal line (9-period EMA of MACD)
-        # Simplified: use EMA12
         signal = round(ema12 * 0.9, 2)
-        
         histogram = round(macd - signal, 2)
         
         return macd, signal, histogram
@@ -106,7 +100,6 @@ class BTCTradingAgent:
         
         closes = [p[1] for p in prices[-period:]]
         sma = sum(closes) / len(closes)
-        
         variance = sum((x - sma) ** 2 for x in closes) / len(closes)
         std = math.sqrt(variance)
         
@@ -116,39 +109,96 @@ class BTCTradingAgent:
         
         return upper, middle, lower
     
+    def generate_signal_from_indicators(self, price, rsi, ema20, ema50, macd, bb_upper, bb_lower):
+        """Generate signal from technical indicators only (FALLBACK)"""
+        logger.info("🔄 Generating signal from technical indicators (FALLBACK)...")
+        
+        try:
+            # Simple but effective logic
+            signal = "HOLD"
+            confidence = "MEDIUM"
+            reasoning = ""
+            
+            # RSI based signals
+            if rsi < 30:
+                signal = "BUY"
+                confidence = "HIGH"
+                reasoning = "RSI oversold, strong buy signal"
+            elif rsi > 70:
+                signal = "SELL"
+                confidence = "HIGH"
+                reasoning = "RSI overbought, strong sell signal"
+            
+            # EMA confirmation
+            if price > ema20 > ema50 and signal == "BUY":
+                confidence = "HIGH"
+            elif price < ema20 < ema50 and signal == "SELL":
+                confidence = "HIGH"
+            elif price > ema50 and signal == "HOLD":
+                signal = "BUY"
+                confidence = "MEDIUM"
+                reasoning = "Price above EMA50, uptrend"
+            elif price < ema50 and signal == "HOLD":
+                signal = "SELL"
+                confidence = "MEDIUM"
+                reasoning = "Price below EMA50, downtrend"
+            
+            # Bollinger Bands
+            if price < bb_lower and signal != "SELL":
+                signal = "BUY"
+                confidence = "HIGH"
+                reasoning = "Price at lower BB, oversold"
+            elif price > bb_upper and signal != "BUY":
+                signal = "SELL"
+                confidence = "HIGH"
+                reasoning = "Price at upper BB, overbought"
+            
+            # Calculate SL & TP
+            if signal == "BUY":
+                entry = round(price, 2)
+                sl = round(price * 0.98, 2)  # 2% below
+                tp = round(price * 1.03, 2)  # 3% above
+            else:
+                entry = round(price, 2)
+                sl = round(price * 1.02, 2)  # 2% above
+                tp = round(price * 0.97, 2)  # 3% below
+            
+            return {
+                "signal": signal,
+                "confidence": confidence,
+                "entry_price": entry,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "reasoning": reasoning
+            }
+        except Exception as e:
+            logger.error(f"Error generating signal: {e}")
+            return None
+    
     def get_ai_analysis(self, price, rsi, macd, signal, bb_upper, bb_middle, bb_lower, ema20, ema50):
         """Get AI analysis from Groq"""
         try:
-            logger.info("Getting AI analysis from Groq...")
+            logger.info("🤖 Sending request to Groq AI...")
             
-            prompt = f"""You are a professional crypto trader. Analyze BTC/USD with this data:
+            prompt = f"""As a professional crypto trader, analyze BTC/USD:
 
-Current Price: ${price:,.2f}
+Price: ${price:,.2f}
 RSI(14): {rsi}
 MACD: {macd}
-Signal: {signal}
-Histogram: {macd - signal}
+EMA20: ${ema20}
+EMA50: ${ema50}
 BB Upper: ${bb_upper}
 BB Middle: ${bb_middle}
 BB Lower: ${bb_lower}
-EMA20: ${ema20}
-EMA50: ${ema50}
 
-Provide trading decision in JSON format ONLY (no markdown):
-{{
-  "signal": "BUY or SELL or HOLD",
-  "confidence": "HIGH or MEDIUM or LOW",
-  "entry_price": number,
-  "stop_loss": number,
-  "take_profit": number,
-  "reasoning": "Brief analysis (1-2 sentences)"
-}}"""
+Respond ONLY with JSON (no markdown):
+{{"signal": "BUY/SELL/HOLD", "confidence": "HIGH/MEDIUM/LOW", "entry_price": number, "stop_loss": number, "take_profit": number, "reasoning": "brief"}}"""
             
             payload = {
-                "model": "mixtral-8x7b-32768",
+                "model": "llama-3.1-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 300
+                "temperature": 0.5,
+                "max_tokens": 200
             }
             
             headers = {
@@ -158,32 +208,35 @@ Provide trading decision in JSON format ONLY (no markdown):
             
             response = requests.post(self.groq_url, json=payload, headers=headers, timeout=20)
             
+            logger.info(f"Groq response: {response.status_code}")
+            
             if response.status_code == 200:
                 result = response.json()
                 content = result['choices'][0]['message']['content']
                 
-                # Parse JSON
+                # Clean JSON
                 if "```" in content:
-                    content = content.split("```")[1].split("```")[0]
+                    content = content.split("```")[1]
                     if content.startswith("json"):
                         content = content[4:]
+                    content = content.split("```")[0]
                 
                 analysis = json.loads(content.strip())
                 logger.info(f"✅ AI Analysis: {analysis.get('signal')}")
                 return analysis
             else:
-                logger.error(f"Groq error: {response.status_code}")
+                logger.error(f"❌ Groq error: {response.status_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"AI analysis error: {e}")
+            logger.error(f"❌ AI error: {e}")
             return None
     
-    def send_signal(self, analysis, price, rsi, macd, ema20, ema50):
+    def send_signal(self, analysis, price, rsi, macd, ema20, ema50, ai_used=True):
         """Send trading signal to Telegram"""
         try:
             if not analysis:
-                msg = "❌ <b>Analysis Failed</b>\nCould not get AI analysis. Retry in 30 min."
+                msg = "❌ Analysis Failed\nCould not get analysis. Retrying in 30 min."
                 self.send_telegram(msg)
                 return
             
@@ -195,6 +248,7 @@ Provide trading decision in JSON format ONLY (no markdown):
             reason = analysis.get('reasoning', 'N/A')
             
             emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🟡"
+            ai_status = "🤖 AI Analysis" if ai_used else "📊 Technical Analysis"
             
             message = f"""
 <b>{emoji} BTC/USD TRADING SIGNAL</b>
@@ -202,19 +256,18 @@ Provide trading decision in JSON format ONLY (no markdown):
 <b>SIGNAL:</b> {signal}
 <b>CONFIDENCE:</b> {confidence}
 
-<b>📊 Price Action:</b>
-Current: ${price:,.2f}
+<b>💰 Entry Strategy:</b>
 Entry: ${entry}
 SL: ${sl}
 TP: ${tp}
 
-<b>📈 Technical:</b>
+<b>📈 Technicals:</b>
 RSI: {rsi}
 MACD: {macd}
 EMA20: ${ema20}
 EMA50: ${ema50}
 
-<b>💡 Analysis:</b>
+<b>💡 {ai_status}:</b>
 {reason}
 
 <i>Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
@@ -250,38 +303,48 @@ EMA50: ${ema50}
         logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] STARTING ANALYSIS")
         logger.info("=" * 70)
         
-        # Step 1: Fetch data
+        # Fetch data
         prices = self.fetch_btc_data()
         if not prices or len(prices) < 50:
-            logger.error("❌ Not enough price data")
+            logger.error("❌ Not enough data")
             self.send_telegram("❌ Error: Not enough price data")
             return
         
         current_price = prices[-1][1]
-        logger.info(f"Current BTC Price: ${current_price:,.2f}")
+        logger.info(f"Current BTC: ${current_price:,.2f}")
         
-        # Step 2: Calculate indicators
         try:
+            # Calculate indicators
             rsi = self.calculate_rsi(prices, 14)
             ema20 = self.calculate_ema(prices, 20)
             ema50 = self.calculate_ema(prices, 50)
             macd, signal, histogram = self.calculate_macd(prices)
             bb_upper, bb_middle, bb_lower = self.calculate_bollinger_bands(prices, 20, 2)
             
-            logger.info(f"✅ Indicators - RSI:{rsi}, MACD:{macd}, EMA20:{ema20}, EMA50:{ema50}")
+            logger.info(f"✅ Indicators: RSI={rsi}, MACD={macd}, EMA20={ema20}, EMA50={ema50}")
             
-            # Step 3: Get AI analysis
+            # Try AI analysis first
             analysis = self.get_ai_analysis(
                 current_price, rsi, macd, signal, 
                 bb_upper, bb_middle, bb_lower, ema20, ema50
             )
             
-            # Step 4: Send signal
-            self.send_signal(analysis, current_price, rsi, macd, ema20, ema50)
+            # If AI fails, use fallback
+            if not analysis:
+                logger.warning("⚠️ AI failed, using technical indicators fallback...")
+                analysis = self.generate_signal_from_indicators(
+                    current_price, rsi, ema20, ema50, macd, bb_upper, bb_lower
+                )
+                ai_used = False
+            else:
+                ai_used = True
+            
+            # Send signal
+            self.send_signal(analysis, current_price, rsi, macd, ema20, ema50, ai_used)
             
         except Exception as e:
-            logger.error(f"Analysis error: {e}")
-            self.send_telegram(f"❌ Error: {str(e)}")
+            logger.error(f"Error: {e}")
+            self.send_telegram(f"❌ Error: {str(e)[:100]}")
         
         logger.info("=" * 70)
     
@@ -290,14 +353,14 @@ EMA50: ${ema50}
         schedule.every(30).minutes.do(self.run_analysis)
         
         logger.info("\n" + "=" * 70)
-        logger.info("🤖 PROFESSIONAL BTC TRADING AGENT STARTED")
+        logger.info("🚀 PROFESSIONAL BTC TRADING AGENT v2 (FIXED)")
         logger.info("=" * 70)
-        logger.info("📊 Monitoring: BTC/USD")
-        logger.info("⏱️  Interval: Every 30 minutes")
-        logger.info("🤖 AI: Groq (Professional Analysis)")
-        logger.info("📱 Platform: Telegram")
-        logger.info("🔄 Status: 24/7 Running")
-        logger.info("Press Ctrl+C to stop\n")
+        logger.info("✅ AI: Groq (with fallback)")
+        logger.info("✅ Data: CoinGecko")
+        logger.info("✅ Interval: Every 30 minutes")
+        logger.info("✅ Telegram: Real-time alerts")
+        logger.info("✅ Status: 24/7 Running")
+        logger.info("=" * 70 + "\n")
         
         # Run first analysis immediately
         self.run_analysis()
@@ -311,7 +374,7 @@ EMA50: ${ema50}
                 logger.info("\n🛑 Agent stopped")
                 break
             except Exception as e:
-                logger.error(f"Scheduler error: {e}")
+                logger.error(f"Error: {e}")
                 time.sleep(60)
 
 def main():

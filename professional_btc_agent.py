@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Professional BTC/USD Trading Signal Agent - FIXED VERSION
-- Fixed Groq API model and format
-- Added fallback logic (if AI fails, use technical indicators)
-- Guaranteed to work 24/7
+Professional BTC Hourly Predictor v3
+- Analyze past 1 hour (11:00-12:00)
+- PREDICT next 1 hour (12:00-13:00) direction
+- Generate BUY/SELL signals with tight SL/TP
+- Signal every 1 hour
 """
 
 import requests
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import schedule
 import logging
 import math
@@ -20,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class BTCTradingAgent:
+class BTCHourlyPredictor:
     def __init__(self, groq_api_key, telegram_token, chat_id):
         self.groq_key = groq_api_key
         self.telegram_token = telegram_token
@@ -28,177 +29,101 @@ class BTCTradingAgent:
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
         self.coingecko_url = "https://api.coingecko.com/api/v3"
         
-    def fetch_btc_data(self):
-        """Fetch BTC hourly data from CoinGecko"""
+    def fetch_btc_data(self, days=1):
+        """Fetch BTC 5-minute data for accurate hourly analysis"""
         try:
-            logger.info("📥 Fetching BTC hourly data...")
+            logger.info("📥 Fetching BTC 5-minute data...")
             url = f"{self.coingecko_url}/coins/bitcoin/market_chart"
             params = {
                 "vs_currency": "usd",
-                "days": "7",
-                "interval": "hourly"
+                "days": days,
+                "interval": "5m"
             }
             response = requests.get(url, params=params, timeout=15)
             if response.status_code == 200:
                 data = response.json()
                 prices = data.get('prices', [])
-                logger.info(f"✅ Fetched {len(prices)} price points")
+                logger.info(f"✅ Fetched {len(prices)} price points (5m interval)")
                 return prices
             return None
         except Exception as e:
             logger.error(f"Error fetching data: {e}")
             return None
     
-    def calculate_rsi(self, prices, period=14):
-        """Calculate RSI indicator"""
-        if len(prices) < period + 1:
+    def get_last_hour_data(self, prices):
+        """Extract last 1 hour of data"""
+        if not prices or len(prices) < 12:  # 12 * 5min = 60min
             return None
-        closes = [p[1] for p in prices]
-        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-        gains = [d if d > 0 else 0 for d in deltas]
-        losses = [-d if d < 0 else 0 for d in deltas]
-        
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
-        
-        if avg_loss == 0:
-            return 100
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return round(rsi, 2)
+        return prices[-12:]  # Last 12 candles (5min each)
     
-    def calculate_ema(self, prices, period):
-        """Calculate EMA"""
-        if len(prices) < period:
+    def analyze_hour_momentum(self, hour_prices):
+        """Analyze momentum of past 1 hour"""
+        if not hour_prices or len(hour_prices) < 2:
             return None
-        closes = [p[1] for p in prices]
-        multiplier = 2 / (period + 1)
-        ema = sum(closes[:period]) / period
         
-        for price in closes[period:]:
-            ema = (price * multiplier) + (ema * (1 - multiplier))
-        return round(ema, 2)
+        closes = [p[1] for p in hour_prices]
+        open_price = closes[0]
+        close_price = closes[-1]
+        high_price = max(closes)
+        low_price = min(closes)
+        
+        # Calculate momentum
+        change_pct = ((close_price - open_price) / open_price) * 100
+        volatility = ((high_price - low_price) / open_price) * 100
+        
+        # Trend direction
+        if change_pct > 0.1:
+            trend = "UPTREND"
+            strength = min(100, abs(change_pct) * 10)
+        elif change_pct < -0.1:
+            trend = "DOWNTREND"
+            strength = min(100, abs(change_pct) * 10)
+        else:
+            trend = "SIDEWAYS"
+            strength = 30
+        
+        return {
+            "open": round(open_price, 2),
+            "close": round(close_price, 2),
+            "high": round(high_price, 2),
+            "low": round(low_price, 2),
+            "change_pct": round(change_pct, 3),
+            "volatility": round(volatility, 3),
+            "trend": trend,
+            "strength": round(strength, 1)
+        }
     
-    def calculate_macd(self, prices):
-        """Calculate MACD"""
-        ema12 = self.calculate_ema(prices, 12)
-        ema26 = self.calculate_ema(prices, 26)
-        
-        if not ema12 or not ema26:
-            return None, None, None
-        
-        macd = round(ema12 - ema26, 2)
-        signal = round(ema12 * 0.9, 2)
-        histogram = round(macd - signal, 2)
-        
-        return macd, signal, histogram
-    
-    def calculate_bollinger_bands(self, prices, period=20, std_dev=2):
-        """Calculate Bollinger Bands"""
-        if len(prices) < period:
-            return None, None, None
-        
-        closes = [p[1] for p in prices[-period:]]
-        sma = sum(closes) / len(closes)
-        variance = sum((x - sma) ** 2 for x in closes) / len(closes)
-        std = math.sqrt(variance)
-        
-        upper = round(sma + (std_dev * std), 2)
-        middle = round(sma, 2)
-        lower = round(sma - (std_dev * std), 2)
-        
-        return upper, middle, lower
-    
-    def generate_signal_from_indicators(self, price, rsi, ema20, ema50, macd, bb_upper, bb_lower):
-        """Generate signal from technical indicators only (FALLBACK)"""
-        logger.info("🔄 Generating signal from technical indicators (FALLBACK)...")
-        
+    def predict_next_hour(self, current_price, momentum_data):
+        """Predict direction for next 1 hour using Groq"""
         try:
-            # Simple but effective logic
-            signal = "HOLD"
-            confidence = "MEDIUM"
-            reasoning = ""
+            logger.info("🤖 Predicting next 1 hour direction...")
             
-            # RSI based signals
-            if rsi < 30:
-                signal = "BUY"
-                confidence = "HIGH"
-                reasoning = "RSI oversold, strong buy signal"
-            elif rsi > 70:
-                signal = "SELL"
-                confidence = "HIGH"
-                reasoning = "RSI overbought, strong sell signal"
-            
-            # EMA confirmation
-            if price > ema20 > ema50 and signal == "BUY":
-                confidence = "HIGH"
-            elif price < ema20 < ema50 and signal == "SELL":
-                confidence = "HIGH"
-            elif price > ema50 and signal == "HOLD":
-                signal = "BUY"
-                confidence = "MEDIUM"
-                reasoning = "Price above EMA50, uptrend"
-            elif price < ema50 and signal == "HOLD":
-                signal = "SELL"
-                confidence = "MEDIUM"
-                reasoning = "Price below EMA50, downtrend"
-            
-            # Bollinger Bands
-            if price < bb_lower and signal != "SELL":
-                signal = "BUY"
-                confidence = "HIGH"
-                reasoning = "Price at lower BB, oversold"
-            elif price > bb_upper and signal != "BUY":
-                signal = "SELL"
-                confidence = "HIGH"
-                reasoning = "Price at upper BB, overbought"
-            
-            # Calculate SL & TP
-            if signal == "BUY":
-                entry = round(price, 2)
-                sl = round(price * 0.98, 2)  # 2% below
-                tp = round(price * 1.03, 2)  # 3% above
-            else:
-                entry = round(price, 2)
-                sl = round(price * 1.02, 2)  # 2% above
-                tp = round(price * 0.97, 2)  # 3% below
-            
-            return {
-                "signal": signal,
-                "confidence": confidence,
-                "entry_price": entry,
-                "stop_loss": sl,
-                "take_profit": tp,
-                "reasoning": reasoning
-            }
-        except Exception as e:
-            logger.error(f"Error generating signal: {e}")
-            return None
-    
-    def get_ai_analysis(self, price, rsi, macd, signal, bb_upper, bb_middle, bb_lower, ema20, ema50):
-        """Get AI analysis from Groq"""
-        try:
-            logger.info("🤖 Sending request to Groq AI...")
-            
-            prompt = f"""As a professional crypto trader, analyze BTC/USD:
+            prompt = f"""You are a professional crypto trader. Based on past 1 hour momentum, predict BTC/USD direction for NEXT 1 HOUR.
 
-Price: ${price:,.2f}
-RSI(14): {rsi}
-MACD: {macd}
-EMA20: ${ema20}
-EMA50: ${ema50}
-BB Upper: ${bb_upper}
-BB Middle: ${bb_middle}
-BB Lower: ${bb_lower}
+PAST 1 HOUR DATA:
+- Open: ${momentum_data['open']}
+- Close: ${momentum_data['close']}
+- High: ${momentum_data['high']}
+- Low: ${momentum_data['low']}
+- Change: {momentum_data['change_pct']}%
+- Volatility: {momentum_data['volatility']}%
+- Trend: {momentum_data['trend']}
+- Strength: {momentum_data['strength']}/100
 
-Respond ONLY with JSON (no markdown):
-{{"signal": "BUY/SELL/HOLD", "confidence": "HIGH/MEDIUM/LOW", "entry_price": number, "stop_loss": number, "take_profit": number, "reasoning": "brief"}}"""
+Current Price: ${current_price}
+
+Based on MOMENTUM and TREND, predict:
+1. Will price go UP or DOWN in next 1 hour?
+2. How strong is this direction? (percentage)
+
+Respond ONLY with JSON:
+{{"direction": "UP/DOWN", "prediction_strength": number_0_to_100, "reasoning": "brief reason"}}"""
             
             payload = {
                 "model": "llama-3.1-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.5,
-                "max_tokens": 200
+                "temperature": 0.3,
+                "max_tokens": 150
             }
             
             headers = {
@@ -207,8 +132,6 @@ Respond ONLY with JSON (no markdown):
             }
             
             response = requests.post(self.groq_url, json=payload, headers=headers, timeout=20)
-            
-            logger.info(f"Groq response: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
@@ -221,63 +144,126 @@ Respond ONLY with JSON (no markdown):
                         content = content[4:]
                     content = content.split("```")[0]
                 
-                analysis = json.loads(content.strip())
-                logger.info(f"✅ AI Analysis: {analysis.get('signal')}")
-                return analysis
+                prediction = json.loads(content.strip())
+                logger.info(f"✅ Prediction: {prediction.get('direction')}")
+                return prediction
             else:
                 logger.error(f"❌ Groq error: {response.status_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ AI error: {e}")
+            logger.error(f"❌ Prediction error: {e}")
             return None
     
-    def send_signal(self, analysis, price, rsi, macd, ema20, ema50, ai_used=True):
-        """Send trading signal to Telegram"""
+    def generate_signal(self, current_price, momentum_data, prediction):
+        """Generate trading signal with tight SL/TP"""
         try:
-            if not analysis:
-                msg = "❌ Analysis Failed\nCould not get analysis. Retrying in 30 min."
-                self.send_telegram(msg)
+            if not prediction:
+                return None
+            
+            direction = prediction.get('direction', 'DOWN')
+            strength = prediction.get('prediction_strength', 50)
+            reasoning = prediction.get('reasoning', '')
+            
+            # Confidence based on strength
+            if strength > 70:
+                confidence = "HIGH"
+            elif strength > 50:
+                confidence = "MEDIUM"
+            else:
+                confidence = "LOW"
+            
+            # Generate signal
+            if direction == "UP":
+                signal = "BUY"
+                entry = round(current_price, 2)
+                # Tight SL: 0.5% below entry
+                stop_loss = round(entry * 0.995, 2)
+                # TP: 1% above entry (tight and achievable in 1 hour)
+                take_profit = round(entry * 1.01, 2)
+                pips_sl = round((entry - stop_loss) * 100, 2)
+                pips_tp = round((take_profit - entry) * 100, 2)
+            else:
+                signal = "SELL"
+                entry = round(current_price, 2)
+                # Tight SL: 0.5% above entry
+                stop_loss = round(entry * 1.005, 2)
+                # TP: 1% below entry
+                take_profit = round(entry * 0.99, 2)
+                pips_sl = round((stop_loss - entry) * 100, 2)
+                pips_tp = round((entry - take_profit) * 100, 2)
+            
+            return {
+                "signal": signal,
+                "confidence": confidence,
+                "entry_price": entry,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "pips_sl": pips_sl,
+                "pips_tp": pips_tp,
+                "prediction_strength": strength,
+                "reasoning": reasoning,
+                "past_trend": momentum_data['trend'],
+                "past_change": momentum_data['change_pct']
+            }
+        except Exception as e:
+            logger.error(f"Signal error: {e}")
+            return None
+    
+    def send_signal(self, signal, momentum_data):
+        """Send signal to Telegram"""
+        try:
+            if not signal:
+                self.send_telegram("❌ Could not generate signal. Retrying in 1 hour.")
                 return
             
-            signal = analysis.get('signal', 'N/A')
-            confidence = analysis.get('confidence', 'N/A')
-            entry = analysis.get('entry_price', 'N/A')
-            sl = analysis.get('stop_loss', 'N/A')
-            tp = analysis.get('take_profit', 'N/A')
-            reason = analysis.get('reasoning', 'N/A')
+            sig = signal['signal']
+            conf = signal['confidence']
+            entry = signal['entry_price']
+            sl = signal['stop_loss']
+            tp = signal['take_profit']
+            pips_sl = signal['pips_sl']
+            pips_tp = signal['pips_tp']
+            strength = signal['prediction_strength']
+            reason = signal['reasoning']
+            trend = signal['past_trend']
+            change = signal['past_change']
             
-            emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🟡"
-            ai_status = "🤖 AI Analysis" if ai_used else "📊 Technical Analysis"
+            emoji = "🟢" if sig == "BUY" else "🔴"
             
             message = f"""
-<b>{emoji} BTC/USD TRADING SIGNAL</b>
+<b>{emoji} BTC/USD 1-HOUR PREDICTION</b>
 
-<b>SIGNAL:</b> {signal}
-<b>CONFIDENCE:</b> {confidence}
+<b>🎯 SIGNAL:</b> {sig}
+<b>📊 CONFIDENCE:</b> {conf} ({strength}%)
 
-<b>💰 Entry Strategy:</b>
+<b>💰 TIGHT ENTRY STRATEGY:</b>
 Entry: ${entry}
-SL: ${sl}
-TP: ${tp}
+SL: ${sl} ({pips_sl} pips)
+TP: ${tp} ({pips_tp} pips)
+Risk/Reward: 1:{round(pips_tp/pips_sl, 2)}
 
-<b>📈 Technicals:</b>
-RSI: {rsi}
-MACD: {macd}
-EMA20: ${ema20}
-EMA50: ${ema50}
+<b>📈 Past 1 Hour Analysis:</b>
+Trend: {trend}
+Change: {change}%
+Volatility: {momentum_data['volatility']}%
 
-<b>💡 {ai_status}:</b>
+<b>🔮 Next 1 Hour Prediction:</b>
 {reason}
 
-<i>Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
+<b>⏰ Timeline:</b>
+Signal Time: {datetime.now().strftime('%H:%M UTC')}
+Close Time: {(datetime.now() + timedelta(hours=1)).strftime('%H:%M UTC')}
+(Position should be closed by next signal)
+
+<i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
 """
             
             self.send_telegram(message)
-            logger.info(f"✅ Signal sent: {signal}")
+            logger.info(f"✅ Signal sent: {sig}")
             
         except Exception as e:
-            logger.error(f"Signal error: {e}")
+            logger.error(f"Send signal error: {e}")
     
     def send_telegram(self, message):
         """Send message to Telegram"""
@@ -297,50 +283,44 @@ EMA50: ${ema50}
             logger.error(f"Telegram error: {e}")
             return False
     
-    def run_analysis(self):
-        """Main analysis cycle"""
+    def run_prediction(self):
+        """Main prediction cycle"""
         logger.info("=" * 70)
-        logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] STARTING ANALYSIS")
+        logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] HOURLY PREDICTION")
         logger.info("=" * 70)
-        
-        # Fetch data
-        prices = self.fetch_btc_data()
-        if not prices or len(prices) < 50:
-            logger.error("❌ Not enough data")
-            self.send_telegram("❌ Error: Not enough price data")
-            return
-        
-        current_price = prices[-1][1]
-        logger.info(f"Current BTC: ${current_price:,.2f}")
         
         try:
-            # Calculate indicators
-            rsi = self.calculate_rsi(prices, 14)
-            ema20 = self.calculate_ema(prices, 20)
-            ema50 = self.calculate_ema(prices, 50)
-            macd, signal, histogram = self.calculate_macd(prices)
-            bb_upper, bb_middle, bb_lower = self.calculate_bollinger_bands(prices, 20, 2)
+            # Fetch data
+            prices = self.fetch_btc_data(days=1)
+            if not prices:
+                self.send_telegram("❌ Error: Could not fetch BTC data")
+                return
             
-            logger.info(f"✅ Indicators: RSI={rsi}, MACD={macd}, EMA20={ema20}, EMA50={ema50}")
+            # Get last hour
+            hour_data = self.get_last_hour_data(prices)
+            if not hour_data:
+                self.send_telegram("❌ Error: Not enough data")
+                return
             
-            # Try AI analysis first
-            analysis = self.get_ai_analysis(
-                current_price, rsi, macd, signal, 
-                bb_upper, bb_middle, bb_lower, ema20, ema50
-            )
+            current_price = hour_data[-1][1]
+            logger.info(f"Current BTC: ${current_price:,.2f}")
             
-            # If AI fails, use fallback
-            if not analysis:
-                logger.warning("⚠️ AI failed, using technical indicators fallback...")
-                analysis = self.generate_signal_from_indicators(
-                    current_price, rsi, ema20, ema50, macd, bb_upper, bb_lower
-                )
-                ai_used = False
-            else:
-                ai_used = True
+            # Analyze past 1 hour momentum
+            momentum = self.analyze_hour_momentum(hour_data)
+            if not momentum:
+                self.send_telegram("❌ Error: Could not analyze momentum")
+                return
+            
+            logger.info(f"✅ Past 1h: {momentum['trend']} ({momentum['change_pct']}%)")
+            
+            # Predict next 1 hour
+            prediction = self.predict_next_hour(current_price, momentum)
+            
+            # Generate signal
+            signal = self.generate_signal(current_price, momentum, prediction)
             
             # Send signal
-            self.send_signal(analysis, current_price, rsi, macd, ema20, ema50, ai_used)
+            self.send_signal(signal, momentum)
             
         except Exception as e:
             logger.error(f"Error: {e}")
@@ -349,21 +329,22 @@ EMA50: ${ema50}
         logger.info("=" * 70)
     
     def schedule(self):
-        """Schedule analysis every 30 minutes"""
-        schedule.every(30).minutes.do(self.run_analysis)
+        """Schedule prediction every 1 hour"""
+        schedule.every(1).hours.do(self.run_prediction)
         
         logger.info("\n" + "=" * 70)
-        logger.info("🚀 PROFESSIONAL BTC TRADING AGENT v2 (FIXED)")
+        logger.info("🚀 BTC HOURLY PREDICTOR v3 - STARTED")
         logger.info("=" * 70)
-        logger.info("✅ AI: Groq (with fallback)")
-        logger.info("✅ Data: CoinGecko")
-        logger.info("✅ Interval: Every 30 minutes")
-        logger.info("✅ Telegram: Real-time alerts")
-        logger.info("✅ Status: 24/7 Running")
+        logger.info("📊 Analysis: Past 1 hour momentum")
+        logger.info("🔮 Prediction: Next 1 hour direction")
+        logger.info("💰 SL/TP: TIGHT (0.5% SL, 1% TP)")
+        logger.info("⏰ Interval: Every 1 hour")
+        logger.info("📱 Platform: Telegram")
+        logger.info("🔄 Status: 24/7 Running")
         logger.info("=" * 70 + "\n")
         
-        # Run first analysis immediately
-        self.run_analysis()
+        # Run first prediction immediately
+        self.run_prediction()
         
         # Keep running
         while True:
@@ -371,7 +352,7 @@ EMA50: ${ema50}
                 schedule.run_pending()
                 time.sleep(60)
             except KeyboardInterrupt:
-                logger.info("\n🛑 Agent stopped")
+                logger.info("\n🛑 Predictor stopped")
                 break
             except Exception as e:
                 logger.error(f"Error: {e}")
@@ -382,8 +363,8 @@ def main():
     TELEGRAM_TOKEN = "8983924607:AAFlsr-gQKMAYVIuexPkrimeBvUHd_WcM_A"
     CHAT_ID = "5280470660"
     
-    agent = BTCTradingAgent(GROQ_KEY, TELEGRAM_TOKEN, CHAT_ID)
-    agent.schedule()
+    predictor = BTCHourlyPredictor(GROQ_KEY, TELEGRAM_TOKEN, CHAT_ID)
+    predictor.schedule()
 
 if __name__ == "__main__":
     main()

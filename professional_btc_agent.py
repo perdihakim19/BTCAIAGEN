@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-BTC Hourly Predictor FIXED v4
-- Uses hourly data (reliable from CoinGecko free tier)
+BTC Hourly Predictor FINAL v4
+- Uses hourly data (reliable)
 - Analyze past 1-2 hours momentum
 - PREDICT next 1 hour direction
-- TIGHT SL/TP: 0.5% SL, 0.8-1% TP
+- TIGHT SL/TP: 0.5% SL, 0.8% TP
+- SHOWS INDONESIA TIME (WIB)
 """
 
 import requests
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta
 import schedule
 import logging
 import math
+import pytz
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +30,7 @@ class BTCHourlyPredictor:
         self.chat_id = chat_id
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
         self.coingecko_url = "https://api.coingecko.com/api/v3"
+        self.wib = pytz.timezone('Asia/Jakarta')
         
     def fetch_btc_hourly(self):
         """Fetch BTC hourly data (RELIABLE)"""
@@ -245,7 +248,7 @@ Respond ONLY with JSON:
             return None
     
     def send_signal_telegram(self, signal, momentum):
-        """Send signal to Telegram"""
+        """Send signal to Telegram with INDONESIA TIME"""
         try:
             if not signal:
                 self.send_telegram("❌ Could not generate signal. Next prediction in 1 hour.")
@@ -266,8 +269,9 @@ Respond ONLY with JSON:
             emoji = "🟢" if sig == "BUY" else "🔴"
             rr = round(pips_tp / pips_sl, 2) if pips_sl > 0 else 0
             
-            now = datetime.now()
-            next_hour = now + timedelta(hours=1)
+            # Indonesia timezone (WIB = UTC+7)
+            now_wib = datetime.now(self.wib)
+            next_hour_wib = now_wib + timedelta(hours=1)
             
             message = f"""
 <b>{emoji} BTC/USD 1-HOUR PREDICTION</b>
@@ -289,12 +293,12 @@ Volatility: {momentum['volatility']}%
 <b>🔮 Next 1 Hour Prediction:</b>
 {reason}
 
-<b>⏰ Timeline:</b>
-Signal: {now.strftime('%H:%M UTC')}
-Close: {next_hour.strftime('%H:%M UTC')}
+<b>⏰ Timeline (WIB):</b>
+Signal: {now_wib.strftime('%H:%M WIB')}
+Close: {next_hour_wib.strftime('%H:%M WIB')}
 (Position closes before next signal)
 
-<i>{now.strftime('%Y-%m-%d %H:%M:%S')} UTC</i>
+<i>{now_wib.strftime('%Y-%m-%d %H:%M:%S')} WIB</i>
 """
             
             self.send_telegram(message)
@@ -321,7 +325,7 @@ Close: {next_hour.strftime('%H:%M UTC')}
     def run(self):
         """Main cycle"""
         logger.info("=" * 70)
-        logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] HOURLY PREDICTION")
+        logger.info(f"[{datetime.now(self.wib).strftime('%Y-%m-%d %H:%M:%S WIB')}] HOURLY PREDICTION")
         logger.info("=" * 70)
         
         try:
@@ -368,15 +372,18 @@ Close: {next_hour.strftime('%H:%M UTC')}
         """Schedule every 1 hour"""
         schedule.every(1).hours.do(self.run)
         
+        now_wib = datetime.now(self.wib)
         logger.info("\n" + "=" * 70)
-        logger.info("🚀 BTC HOURLY PREDICTOR v4 (FIXED)")
+        logger.info("🚀 BTC HOURLY PREDICTOR FINAL (INDONESIA TIME)")
         logger.info("=" * 70)
-        logger.info("✅ Data: Hourly (CoinGecko - reliable)")
+        logger.info("✅ Data: Hourly (CoinGecko)")
         logger.info("✅ Analysis: Past 2 hours momentum")
         logger.info("✅ Prediction: Next 1 hour direction")
         logger.info("✅ SL/TP: TIGHT (0.5% SL, 0.8% TP)")
+        logger.info("✅ Time: Indonesia (WIB)")
         logger.info("✅ Interval: Every 1 hour")
         logger.info("✅ Status: 24/7 Running")
+        logger.info(f"Current Time: {now_wib.strftime('%Y-%m-%d %H:%M:%S WIB')}")
         logger.info("=" * 70 + "\n")
         
         # Run first immediately
